@@ -103,10 +103,10 @@ def detect_terminal(parents: list[str]) -> str:
         if name in TERMINALS:
             return TERMINALS[name]
     env = os.environ
-    if env.get("TERM_PROGRAM") == "vscode":
-        return "VS Code"
-    if env.get("TERM_PROGRAM"):
-        return env["TERM_PROGRAM"]
+    program = env.get("TERM_PROGRAM", "")
+    if program:
+        return {"vscode": "VS Code", "claude-desktop": "Claude", "iTerm.app": "iTerm2",
+                "WezTerm": "WezTerm", "ghostty": "Ghostty", "tmux": "tmux"}.get(program, program)
     term = env.get("TERM", "")
     for key, name in (("kitty", "kitty"), ("ghostty", "Ghostty"), ("alacritty", "Alacritty"), ("foot", "foot"),
                       ("wezterm", "WezTerm")):
@@ -166,6 +166,21 @@ def packages() -> dict:
     return counts
 
 
+def pci_device_name(ids: str, vid: str, did: str) -> str:
+    """Look a device up in pci.ids, e.g. '1002','150e' -> 'Radeon 880M / 890M'."""
+    in_vendor = False
+    for line in ids.splitlines():
+        if not line or line.startswith("#"):
+            continue
+        if not line.startswith("\t"):
+            if in_vendor:
+                break
+            in_vendor = line.startswith(f"{vid}  ")
+        elif in_vendor and line.startswith(f"\t{did}  "):
+            return re.sub(r".*\[(.*)\].*", r"\1", line[len(did) + 3:])
+    return ""
+
+
 def gpus() -> list[str]:
     names = []
     out = run(["lspci", "-mm"])
@@ -179,11 +194,18 @@ def gpus() -> list[str]:
                         vendor = short
                 model = re.sub(r".*\[(.*)\].*", r"\1", parts[2])
                 names.append(f"{vendor} {model}".strip())
-    if not names:  # no lspci: at least the vendor
-        for vfile in glob.glob("/sys/class/drm/card*/device/vendor"):
-            vendor = {"0x10de": "NVIDIA", "0x1002": "AMD", "0x8086": "Intel"}.get(read(vfile).strip())
-            if vendor and vendor not in names:
-                names.append(vendor)
+    if not names:  # no lspci (e.g. in a container): look the IDs up in pci.ids ourselves
+        ids = read("/usr/share/hwdata/pci.ids") or read(f"{HOST}/usr/share/hwdata/pci.ids") \
+            or read("/usr/share/misc/pci.ids")
+        for dev in glob.glob("/sys/bus/pci/devices/*"):
+            if not read(f"{dev}/class").startswith("0x03"):
+                continue
+            vid, did = read(f"{dev}/vendor").strip()[2:], read(f"{dev}/device").strip()[2:]
+            vendor = {"10de": "NVIDIA", "1002": "AMD", "8086": "Intel"}.get(vid, "")
+            model = pci_device_name(ids, vid, did)
+            name = f"{vendor} {model}".strip()
+            if name and name not in names:
+                names.append(name)
     return names
 
 
@@ -456,6 +478,9 @@ TERMINAL_ROASTS = {
     "Ghostty": ["Ghostty: you switched the day it launched. Don't lie."],
     "xterm": ["xterm in this decade? Are you a museum?"],
     "VS Code": ["Running a fetch inside VS Code's terminal. Nobody's impressed."],
+    "Claude": ["Running this in Claude's terminal. You could've just asked the AI to roast you.",
+               "Your terminal lives inside an AI app. Even your shell has a chaperone."],
+    "tmux": ["tmux: twelve panes, and you look at one."],
     "Tilix": ["Tilix: tiling inside your terminal inside your tiling."],
 }
 SHELL_ROASTS = {

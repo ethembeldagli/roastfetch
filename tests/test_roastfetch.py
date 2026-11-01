@@ -85,6 +85,17 @@ class Roasts(unittest.TestCase):
         self.assertNotIn("\x1b[", out)
         self.assertIn("you@archbox", out)
 
+    def test_pci_lookup_skips_comments(self):
+        ids = ("1002  Advanced Micro Devices, Inc. [AMD/ATI]\n\t1234  Other\n"
+               "# Used in the Steam Deck OLED\n\t150e  Strix [Radeon 880M / 890M]\n"
+               "8086  Intel Corporation\n\t150e  Not this one\n")
+        self.assertEqual(rf.pci_device_name(ids, "1002", "150e"), "Radeon 880M / 890M")
+        self.assertEqual(rf.pci_device_name(ids, "1002", "ffff"), "")
+
+    def test_claude_terminal_gets_roasted(self):
+        texts = " ".join(t for _, t in rf.roasts(dict(rf.DEMO, terminal="Claude"), random.Random(0)))
+        self.assertIn("AI", texts)
+
     def test_vdf(self):
         d = rf.parse_vdf('"A" { "B" { "Playtime" "12" } }')
         self.assertEqual(d["a"]["b"]["playtime"], "12")
