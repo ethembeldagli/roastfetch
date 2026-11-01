@@ -3,10 +3,12 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/ethembeldagli/roastfetch/main/install.sh | sh
 #
-# Options (when piping, pass them after `sh -s --`):
-#   --check         is there a newer version? (changes nothing)
+# Run it and pick: install, update or delete. For scripts, skip the menu with an
+# option (when piping, pass them after `sh -s --`):
+#   --install       install or reinstall
 #   --update        install only if there's a newer version
 #   --uninstall     remove roastfetch
+#   --check         is there a newer version? (changes nothing)
 #   --bin-dir DIR   where the command goes (default ~/.local/bin, /usr/local/bin as root)
 #   --from DIR      install from a local checkout
 #
@@ -75,12 +77,17 @@ usage() {
     cat <<EOF
 roastfetch installer
 
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh                  install or update
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --check    check for updates
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --update   update if newer
-  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh -s -- --uninstall
+  curl -fsSL https://raw.githubusercontent.com/$REPO/main/install.sh | sh
 
-Options: --check, --update, --uninstall, --bin-dir DIR, --from DIR
+Run it and choose: install, update or delete.
+
+To skip the menu (scripts, CI), add an option after  sh -s --
+  --install       install or reinstall
+  --update        install only if there's a newer version
+  --uninstall     remove roastfetch
+  --check         is there a newer version? (changes nothing)
+  --bin-dir DIR   where the command goes (default ~/.local/bin, /usr/local/bin as root)
+  --from DIR      install from a local checkout
 EOF
 }
 
@@ -105,12 +112,65 @@ f = lambda v: tuple(int(p) for p in v.lstrip("v").split(".") if p.isdigit())
 sys.exit(0 if f(sys.argv[1]) < f(sys.argv[2]) else 1)' "$1" "$2"
 }
 
+# Can we ask the person a question? (Works even when this script is piped from curl.)
+interactive() {
+    [ -t 1 ] && ( : </dev/tty ) 2>/dev/null
+}
+
+ask() { # prompt -> $answer, read from the keyboard
+    printf '%s' "$1"
+    read -r answer </dev/tty || answer=""
+}
+
+menu() { # sets ACTION from the person's choice
+    printf '\n'
+    if [ -z "$current" ]; then
+        printf '  roastfetch is not installed yet.\n\n'
+        printf '    %s[i]%s Install roastfetch %s\n' "$B" "$R" "$latest"
+        printf '    %s[q]%s Quit\n\n' "$B" "$R"
+        default="i"
+    else
+        if [ -n "$latest" ] && older "$current" "$latest"; then
+            printf '  You have roastfetch %s. Version %s%s%s is available.\n\n' "$current" "$B" "$latest" "$R"
+            printf '    %s[u]%s Update to %s\n' "$B" "$R" "$latest"
+            default="u"
+        else
+            printf '  You have roastfetch %s, the latest version.\n\n' "$current"
+            default="q"
+        fi
+        printf '    %s[i]%s Reinstall\n' "$B" "$R"
+        printf '    %s[d]%s Delete roastfetch\n' "$B" "$R"
+        printf '    %s[q]%s Quit\n\n' "$B" "$R"
+    fi
+    while :; do
+        ask "  Choose [$default]: "
+        case "${answer:-$default}" in
+            i | I | install | reinstall) ACTION="install"; break ;;
+            u | U | update) if [ -n "$current" ]; then ACTION="update"; break; fi ;;
+            d | D | delete | uninstall | remove) if [ -n "$current" ]; then ACTION="uninstall"; break; fi ;;
+            q | Q | quit | exit | n | N) ACTION="quit"; break ;;
+        esac
+        printf '  Please type one of the letters in brackets.\n'
+    done
+    printf '\n'
+}
+
+uninstall() {
+    if [ -e "$target" ]; then
+        rm -f "$target"
+        printf '  %s✓%s removed %s. Sorry to see you go!\n\n' "$GRN" "$R" "$(tilde "$target")"
+    else
+        printf '  roastfetch is not installed in %s.\n\n' "$(tilde "$BIN_DIR")"
+    fi
+}
+
 main() {
     BIN_DIR="${ROASTFETCH_BIN_DIR:-}"
     FROM=""
-    ACTION="install"
+    ACTION=""
     while [ $# -gt 0 ]; do
         case "$1" in
+            --install) ACTION="install" ;;
             --uninstall) ACTION="uninstall" ;;
             --check) ACTION="check" ;;
             --update) ACTION="update" ;;
@@ -135,8 +195,7 @@ main() {
     printf '\n  %s%sroastfetch%s %sinstaller%s\n\n' "$B" "$ORG" "$R" "$D" "$R"
 
     if [ "$ACTION" = "uninstall" ]; then
-        if [ -e "$target" ]; then rm -f "$target"; printf '  %s✓%s removed %s\n\n' "$GRN" "$R" "$(tilde "$target")"
-        else printf '  roastfetch is not installed in %s.\n\n' "$(tilde "$BIN_DIR")"; fi
+        uninstall
         return
     fi
 
@@ -152,25 +211,42 @@ main() {
     trap 'rm -rf "$TMP"' EXIT
     trap 'exit 130' INT TERM
     new="$TMP/roastfetch"
+    current="$(installed_version)"
 
+    latest=""
     if [ -n "$FROM" ]; then
         step "copying from $(tilde "$FROM")"
-        cp "$FROM/roastfetch" "$new" 2>/dev/null || die "No roastfetch script in $FROM."
+        cp "$FROM/roastfetch" "$new" 2>/dev/null && latest="$(script_version "$new")"
     else
         step "fetching the latest version"
-        download "https://raw.githubusercontent.com/$REPO/main/roastfetch" "$new" 2>/dev/null \
-            || die "Couldn't reach GitHub." "Check your internet connection and try again."
+        download "https://raw.githubusercontent.com/$REPO/main/roastfetch" "$new" 2>/dev/null && latest="$(script_version "$new")"
     fi
-    latest="$(script_version "$new")"
-    [ -n "$latest" ] || die "That doesn't look like roastfetch." "Please open an issue: https://github.com/$REPO/issues"
-    ok "roastfetch $latest"
-    current="$(installed_version)"
+    if [ -n "$latest" ]; then
+        ok "roastfetch $latest"
+    else
+        printf '%s!%s couldn'"'"'t get it\n' "$YEL" "$R"
+        STEP_OPEN=0
+    fi
+
+    if [ -z "$ACTION" ]; then
+        if interactive; then menu; else ACTION="install"; fi
+    fi
+
+    case "$ACTION" in
+        quit)
+            printf '  Nothing changed.\n\n'
+            return ;;
+        uninstall)
+            uninstall
+            return ;;
+    esac
+    [ -n "$latest" ] || die "Couldn't download roastfetch." "Check your internet connection and try again."
 
     if [ "$ACTION" = "check" ]; then
         if [ -z "$current" ]; then
             printf '\n  roastfetch is not installed yet. Latest is %s%s%s. Install it with:\n    %s\n\n' "$B" "$latest" "$R" "$one_liner"
         elif older "$current" "$latest"; then
-            printf '\n  %s%sUpdate available:%s %s → %s%s%s. Update with:\n    %s -s -- --update\n\n' \
+            printf '\n  %s%sUpdate available:%s %s → %s%s%s. Run the installer again to update:\n    %s\n\n' \
                 "$B" "$YEL" "$R" "$current" "$B" "$latest" "$R" "$one_liner"
         else
             printf '\n  %s%sUp to date.%s You have roastfetch %s.\n\n' "$B" "$GRN" "$R" "$current"
@@ -178,7 +254,7 @@ main() {
         return
     fi
     if [ "$ACTION" = "update" ] && [ -n "$current" ] && ! older "$current" "$latest"; then
-        printf '\n  %s%sAlready up to date%s (roastfetch %s). Nothing to do.\n\n' "$B" "$GRN" "$R" "$current"
+        printf '  %s%sAlready up to date%s (roastfetch %s). Nothing to do.\n\n' "$B" "$GRN" "$R" "$current"
         return
     fi
 
@@ -203,7 +279,7 @@ main() {
         *":$BIN_DIR:"*) ;;
         *) printf '  %s(%s is not on your PATH yet; run it as %s)%s\n' "$YEL" "$(tilde "$BIN_DIR")" "$(tilde "$target")" "$R" ;;
     esac
-    printf '  %sCheck for updates any time:  %s -s -- --check%s\n\n' "$D" "$one_liner" "$R"
+    printf '  %sTo update or remove it later, run the same command again.%s\n\n' "$D" "$R"
 }
 
 main "$@"

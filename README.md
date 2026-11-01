@@ -30,13 +30,10 @@ No fetch tool installed? roastfetch draws its own fetch, with pixel-art distro l
 
 It finishes with a **doneness** rating, from *Rare* to *Charcoal*.
 
-Update, check or uninstall with the same one-liner:
+**Update or uninstall:** run the same command again. It shows what you have, whether there's a newer
+version, and lets you pick **install, update or delete**.
 
-```bash
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/roastfetch/main/install.sh | sh -s -- --check      # newer version?
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/roastfetch/main/install.sh | sh -s -- --update     # update if so
-curl -fsSL https://raw.githubusercontent.com/ethembeldagli/roastfetch/main/install.sh | sh -s -- --uninstall
-```
+For scripts, skip the menu with `sh -s -- --install`, `--update`, `--uninstall` or `--check`.
 
 ## Options
 
