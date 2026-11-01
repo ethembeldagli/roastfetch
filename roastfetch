@@ -716,22 +716,352 @@ def verdict(chosen: list[tuple[int, str]]) -> tuple[str, int]:
 
 # --- drawing -----------------------------------------------------------------
 
-LOGO = [  # a penguin, roasting
-    "     .---.    ",
-    "    / o o \\   ",
-    "    \\  v  /   ",
-    "   /`-----`\\  ",
-    "  |  |   |  | ",
-    "   \\_|___|_/  ",
-    "    (  )  (   ",
-    "   ) (  ) )   ",
-    "  (_)_(_)(_)  ",
-]
-LOGO_PENGUIN_ROWS = 6
+LOGOS = {  # 20x18 pixel art, drawn with half blocks: two pixels per terminal row
+    "arch": ({'a': '#1793d1'}, [
+        ".........aa.........",
+        ".........aa.........",
+        ".........aa.........",
+        "........aaaa........",
+        "........aaaa........",
+        ".......aaaaaa.......",
+        ".......aaaaaa.......",
+        "......aaaaaaaa......",
+        "......aaaaaaaa......",
+        ".....aaaaaaaaaa.....",
+        "....aaaaaaaaaaaa....",
+        "....aaaaa..aaaaa....",
+        "...aaaaaa..aaaaaa...",
+        "...aaaaa....aaaaa...",
+        "..aaaaaa....aaaaaa..",
+        "..aaaaa......aaaaa..",
+        ".aaaaaa......aaaaaa.",
+        ".aaaaa........aaaaa.",
+    ]),
+    "fedora": ({'a': '#3c6eb4', 'w': '#ffffff'}, [
+        ".......aaaaaa.......",
+        ".....aaaaaaaaaa.....",
+        "....aaaaaaaaaaaa....",
+        "...aaaaaaaaaaaaaa...",
+        "..aaaaaaawwwaaaaaa..",
+        "..aaaaaawaaaaaaaaa..",
+        ".aaaaaaawaaaaaaaaaa.",
+        ".aaaaaawwwwaaaaaaaa.",
+        ".aaaaaaawaaaaaaaaaa.",
+        ".aaaaaaawaaaaaaaaaa.",
+        ".aaaaaaawaaaaaaaaaa.",
+        ".aaaaaaawaaaaaaaaaa.",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "...aaaaaaaaaaaaaa...",
+        "....aaaaaaaaaaaa....",
+        ".....aaaaaaaaaa.....",
+        ".......aaaaaa.......",
+    ]),
+    "ubuntu": ({'a': '#e95420'}, [
+        ".........aa.........",
+        "........aaaa........",
+        "........aaaa........",
+        "........aaaa........",
+        "......aa.aa.aa......",
+        ".....aaa....aaa.....",
+        "....aaa......aaa....",
+        "....aa........aa....",
+        "....aa........aa....",
+        "....a..........a....",
+        "....................",
+        "..aaa..........aaa..",
+        "..aaaa........aaaa..",
+        "..aaaa.a....a.aaaa..",
+        "..aaa..aaaaaa..aaa..",
+        "........aaaa........",
+        "....................",
+        "....................",
+    ]),
+    "debian": ({'a': '#d70a53'}, [
+        ".......aaaaaaaa.....",
+        ".......aaaaaaaaa....",
+        "..........aaaaaaa...",
+        "............aaaaaa..",
+        "..............aaaa..",
+        "......aaaaaa..aaaa..",
+        ".....aaaaaaaa..aaa..",
+        ".....aaa...aa..aaa..",
+        "....aaa....aa..aaa..",
+        "....aaa...aaa..aaa..",
+        "....aaa...aa...aaa..",
+        "....aaaa......aaaa..",
+        ".....aaaa....aaaaa..",
+        ".....aaaaaaaaaaaa...",
+        "......aaaaaaaaaa....",
+        ".......aaaaaaa......",
+        "....................",
+        "....................",
+    ]),
+    "bazzite": ({'a': '#8c5cf0', 'w': '#ffffff'}, [
+        ".....aaaaaaaaaa.....",
+        "...aaaaaaaaaaaaaa...",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        ".aaaaaaaaaaaaaaaaaa.",
+        ".aaaaawwwwwwaaaaaaa.",
+        ".aaaaawwaaawwaaaaaa.",
+        ".aaaaawwaaawwaaaaaa.",
+        ".aaaaawwwwwwaaaaaaa.",
+        ".aaaaawwaaaawwaaaaa.",
+        ".aaaaawwaaaawwaaaaa.",
+        ".aaaaawwaaaawwaaaaa.",
+        ".aaaaawwwwwwwaaaaaa.",
+        ".aaaaaaaaaaaaaaaaaa.",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "...aaaaaaaaaaaaaa...",
+        ".....aaaaaaaaaa.....",
+    ]),
+    "linuxmint": ({'a': '#87cf3e', 'w': '#ffffff'}, [
+        "....................",
+        ".....aaaaaaaaaa.....",
+        "...aaaaaaaaaaaaaa...",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        ".aaawwaaaaaaaaaaaaa.",
+        ".aaawwaaaaaaaaaaaaa.",
+        ".aaawwawwwwwwwaaaaa.",
+        ".aaawwawwawwawwaaaa.",
+        ".aaawwawwawwawwaaaa.",
+        ".aaawwawwawwawwaaaa.",
+        ".aaawwawwawwawwaaaa.",
+        ".aaaaaaaaaaaaaaaaaa.",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "...aaaaaaaaaaaaaa...",
+        ".....aaaaaaaaaa.....",
+        "....................",
+    ]),
+    "pop": ({'a': '#48b9c7', 'w': '#ffffff'}, [
+        ".......aaaaaa.......",
+        ".....aaaaaaaaaa.....",
+        "....aaaaaaaaaaaa....",
+        "...aaaaaawwaaaaaa...",
+        "..aaaaaaawwaaaaaaa..",
+        "..aaaaaaawwaaaaaaa..",
+        ".aaaaaaaawwaaaaaaaa.",
+        ".aaaaaaaawwaaaaaaaa.",
+        ".aaaaaaaawwaaaaaaaa.",
+        ".aaaaaaaawwaaaaaaaa.",
+        ".aaaaaaaawwaaaaaaaa.",
+        ".aaaaaaaaaaaaaaaaaa.",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaawwaaaaaaa..",
+        "...aaaaaawwaaaaaa...",
+        "....aaaaaaaaaaaa....",
+        ".....aaaaaaaaaa.....",
+        ".......aaaaaa.......",
+    ]),
+    "manjaro": ({'a': '#35bf5c'}, [
+        "....................",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaa.............",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "..aaaaa.aaaaaaaaaa..",
+        "....................",
+    ]),
+    "nixos": ({'a': '#7ebae4', 'b': '#5277c3'}, [
+        ".........bb.........",
+        ".........bb.........",
+        ".........bb.........",
+        "..a......bb......a..",
+        "..aaa....bb....aaa..",
+        ".aaaaaa..bb..aaaaaa.",
+        "...aaaaa.bb.aaaaa...",
+        ".....aaaabbaaaa.....",
+        "......aaa..aaa......",
+        "......bb....bb......",
+        ".....bbbb..bbbb.....",
+        "...bbbbb.aa.bbbbb...",
+        ".bbbbbb..aa..bbbbbb.",
+        "..bbb....aa....bbb..",
+        "..b......aa......b..",
+        ".........aa.........",
+        ".........aa.........",
+        ".........aa.........",
+    ]),
+    "opensuse": ({'a': '#73ba25', 'w': '#ffffff'}, [
+        ".......aaaaaa.......",
+        ".....aaaaaaaaaa.....",
+        "....aaaaaaaaaaaa....",
+        "...aaaaaaaaaaaaaa...",
+        "..aaaaaaaaaaaaaaaa..",
+        "..aaaaaaawwwwaaaaa..",
+        ".aaaaaaawwwwwwaaaaa.",
+        ".aaaaaawwaaaawwaaaa.",
+        ".aaawwwwwawwawwaaaa.",
+        ".aaawwwwwawwawwaaaa.",
+        ".aaaaaawwaaaawwaaaa.",
+        ".aaaaaaawwwwwwaaaaa.",
+        "..aaaaaaawwwwaaaaa..",
+        "..aaaaaaaaaaaaaaaa..",
+        "...aaaaaaaaaaaaaa...",
+        "....aaaaaaaaaaaa....",
+        ".....aaaaaaaaaa.....",
+        ".......aaaaaa.......",
+    ]),
+    "gentoo": ({'a': '#9a8fe8', 'w': '#ffffff'}, [
+        "....................",
+        ".....aaaaaaaa.......",
+        "....aaaaaaaaaa......",
+        "...aaaaaaaaaaaa.....",
+        "..aaaaaaaaaaaaaa....",
+        ".aaaaaaaaaawwwwaa...",
+        ".aaaaaaaaawwwwwwa...",
+        ".aaaaaaaaawwwaawa...",
+        ".aaaaaaaaawwwaawa...",
+        ".aaaaaaaaawwwwwwa...",
+        ".aaaaaaaaaawwwwaa...",
+        ".aaaaaaaaaaaaaaaa...",
+        ".aaaaaaaaaaaaaaaa...",
+        "..aaaaaaaaaaaaaa....",
+        "...aaaaaaaaaaaa.....",
+        "....aaaaaaaaaa......",
+        ".....aaaaaaaa.......",
+        "....................",
+    ]),
+    "endeavouros": ({'a': '#7f3fbf', 'r': '#ff4d4d', 'b': '#4a7fff'}, [
+        "....................",
+        "..........rr........",
+        "..........rr........",
+        ".........rrrr.......",
+        ".........rrrr.......",
+        "........rrrrab......",
+        "........rrraab......",
+        ".......rrraaaab.....",
+        "......rrrraaaaba....",
+        "......rrraaaaabb....",
+        ".....rrraaaaaabbb...",
+        ".....rraaaaaaabbb...",
+        "....rrraaaaaaaabbb..",
+        "....rraaaaaaaaabbb..",
+        "...rraaaaaaaaaabbbb.",
+        "...raaaaaaaaaaa.....",
+        "..raaa..............",
+        "....................",
+    ]),
+    "tux": ({'k': '#5c5c66', 'w': '#f0f0f0', 'y': '#f5b301'}, [
+        "....................",
+        "........kkkk........",
+        "......kkkkkkkk......",
+        "......kkkkkkkk......",
+        ".....kkwwkkwwkk.....",
+        ".....kkwkwwkwkk.....",
+        ".....kkwwkkwwkk.....",
+        ".....kkkyyyyykk.....",
+        ".....kkkyyyyykk.....",
+        "....kkkkwyyykkkk....",
+        "....kkkwwwwwwkkk....",
+        "....kkwwwwwwwwkk....",
+        "....kkwwwwwwwwkk....",
+        "....kkwwwwwwwwkk....",
+        "....kkwwwwwwwwkk....",
+        "....kkkwwwwwwkkk....",
+        "....yyyyywwwyyyyy...",
+        "....yyyyykkkyyyyy...",
+    ]),
+}
+FLAMES = ({'r': '#ff3b30', 'o': '#ff8a00', 'y': '#ffd60a'}, [
+    "....r......r.....r..",
+    "...ro.....ror....or.",
+    "..roor...royr...ror.",
+    ".royyor.ryyyor.ryyor",
+    "ryyyyyrryyyyyrryyyyr",
+    ".rrrrrrrrrrrrrrrrrr.",
+])
+LOGO_ALIASES = {
+    "kubuntu": "ubuntu", "xubuntu": "ubuntu", "lubuntu": "ubuntu", "ubuntu-studio": "ubuntu",
+    "opensuse-tumbleweed": "opensuse", "opensuse-leap": "opensuse", "opensuse-microos": "opensuse",
+    "pop-os": "pop",
+}
+
+
+ANSI_ANY = re.compile(r"\x1b\[[0-9;?]*[A-Za-z]")
+ANSI_SGR = re.compile(r"\x1b\[[0-9;]*m")
+
+
+def visible_len(line: str) -> int:
+    return len(ANSI_SGR.sub("", line))
+
+
+def borrowed_logo(name: str | None, colour: bool) -> list[str]:
+    """The exact logo your own fetch tool draws, so roastfetch shows the icon you're used to.
+    Tries fastfetch, then neofetch; inside a distrobox, the host's copy."""
+    ff = ["fastfetch", "--structure", "break", "--logo-print-remaining", "true", "--pipe", "false"]
+    nf = ["neofetch", "-L"]
+    if name:
+        ff += ["--logo", name]
+        nf += ["--ascii_distro", name]
+    attempts = [cmd for cmd in (ff, nf) if shutil.which(cmd[0])]
+    if not attempts and IN_BOX and shutil.which("distrobox-host-exec"):
+        attempts = [["distrobox-host-exec", *ff], ["distrobox-host-exec", *nf]]
+    for cmd in attempts:
+        out = run(cmd, timeout=3)
+        # keep colours, drop cursor movement and other non-colour escapes
+        lines = [ANSI_ANY.sub(lambda m: m.group(0) if m.group(0).endswith("m") else "", line).rstrip()
+                 for line in out.splitlines()]
+        while lines and not ANSI_SGR.sub("", lines[0]).strip():
+            lines.pop(0)
+        while lines and not ANSI_SGR.sub("", lines[-1]).strip():
+            lines.pop()
+        if len(lines) >= 3:
+            return [line + "\x1b[0m" if colour else ANSI_SGR.sub("", line) for line in lines]
+    return []
+
+
+def logo_for(distro_id: str) -> str:
+    did = LOGO_ALIASES.get(distro_id, distro_id)
+    return did if did in LOGOS else "tux"
+
+
+def logo_rows(name: str, paint: "Paint", flames_only: bool = False) -> list[str]:
+    """Pixel-art logo plus campfire (or just the campfire), as terminal rows of half blocks."""
+    rows = []
+    for palette, pixels in ((FLAMES,) if flames_only else (LOGOS[name], FLAMES)):
+        if not paint.on:
+            # Without colour, white details (the f, the B...) become holes so they stay visible.
+            pixels = [r.replace("w", ".") for r in pixels]
+        for y in range(0, len(pixels), 2):
+            top_row = pixels[y]
+            bot_row = pixels[y + 1] if y + 1 < len(pixels) else "." * len(top_row)
+            line = ""
+            for t, b in zip(top_row, bot_row):
+                ct, cb = palette.get(t), palette.get(b)
+                if ct and cb and ct == cb:
+                    line += paint("█", ct)
+                elif ct and cb:
+                    line += paint("▀", ct, bg=cb)
+                elif ct:
+                    line += paint("▀", ct)
+                elif cb:
+                    line += paint("▄", cb)
+                else:
+                    line += " "
+            rows.append(line)
+    return rows
+
+
 ACCENTS = {
     "arch": "#1793d1", "endeavouros": "#7f3fbf", "manjaro": "#35bf5c", "cachyos": "#00b4d8", "garuda": "#ff4d6d",
-    "ubuntu": "#e95420", "pop": "#48b9c7", "linuxmint": "#87cf3e", "debian": "#d70a53", "fedora": "#51a2da",
-    "bazzite": "#a66cff", "aurora": "#5aa9ff", "bluefin": "#4c8cff", "nixos": "#7ebae4", "gentoo": "#9a8fe8",
+    "ubuntu": "#e95420", "pop": "#48b9c7", "linuxmint": "#87cf3e", "debian": "#d70a53", "fedora": "#3c6eb4",
+    "bazzite": "#8c5cf0", "aurora": "#5aa9ff", "bluefin": "#4c8cff", "nixos": "#7ebae4", "gentoo": "#9a8fe8",
     "void": "#478061", "alpine": "#4c9bd6", "opensuse-tumbleweed": "#73ba25", "opensuse-leap": "#73ba25",
     "kali": "#367bf0", "zorin": "#15a6f0", "elementary": "#64baff", "steamos": "#1a9fff",
 }
@@ -743,7 +1073,15 @@ class Paint:
         self.on = enabled
         self.true = os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit")
 
-    def __call__(self, text: str, colour: str | None = None, bold: bool = False, dim: bool = False) -> str:
+    def _code(self, layer: str, colour: str) -> str:
+        r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+        if self.true:
+            return f"{layer};2;{r};{g};{b}"
+        q = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40  # noqa: E731
+        return f"{layer};5;{16 + 36 * q(r) + 6 * q(g) + q(b)}"
+
+    def __call__(self, text: str, colour: str | None = None, bold: bool = False, dim: bool = False,
+                 bg: str | None = None) -> str:
         if not self.on:
             return text
         codes = []
@@ -752,12 +1090,9 @@ class Paint:
         if dim:
             codes.append("2")
         if colour:
-            r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
-            if self.true:
-                codes.append(f"38;2;{r};{g};{b}")
-            else:
-                q = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40  # noqa: E731
-                codes.append(f"38;5;{16 + 36 * q(r) + 6 * q(g) + q(b)}")
+            codes.append(self._code("38", colour))
+        if bg:
+            codes.append(self._code("48", bg))
         return f"\x1b[{';'.join(codes)}m{text}\x1b[0m" if codes else text
 
 
@@ -799,7 +1134,8 @@ def info_lines(f: dict) -> list[tuple[str, str]]:
     return rows
 
 
-def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool, roast: bool) -> str:
+def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool, roast: bool,
+           logo_name: str | None = None, pixel: bool = False) -> str:
     accent = ACCENTS.get(f["distro_id"]) or next(
         (ACCENTS[x] for x in f["distro_like"].split() if x in ACCENTS), "#ffb000")
     width = shutil.get_terminal_size((100, 24)).columns
@@ -810,18 +1146,26 @@ def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool
     for key, value in rows:
         right.append(f"{paint(key.ljust(key_w), accent, bold=True)}  {value}")
 
-    logo_w = len(LOGO[0])
-    use_logo = show_logo and width >= 60
+    logo: list[str] = []
+    if show_logo:
+        if not pixel:
+            logo = borrowed_logo(logo_name, paint.on)
+            if logo:
+                # the campfire goes under the borrowed logo, centred
+                w = max(visible_len(line) for line in logo)
+                pad = " " * max(0, (w - 20) // 2)
+                logo += [""] + [pad + row for row in logo_rows("tux", paint, flames_only=True)]
+        if not logo:
+            logo = logo_rows(logo_for(logo_name or f["distro_id"]), paint)
+    logo_w = max((visible_len(line) for line in logo), default=0)
+    if logo and width < logo_w + 45:
+        logo = []  # terminal too narrow: specs and roast matter more than the art
     lines = []
-    for i in range(max(len(right), len(LOGO) if use_logo else 0)):
+    for i in range(max(len(right), len(logo))):
         left = ""
-        if use_logo:
-            if i < len(LOGO):
-                colour = "#e8e8e8" if i < LOGO_PENGUIN_ROWS else FLAME[i - LOGO_PENGUIN_ROWS]
-                left = paint(LOGO[i], colour, bold=i >= LOGO_PENGUIN_ROWS)
-            else:
-                left = " " * logo_w
-            left += "  "
+        if logo:
+            cell = logo[i] if i < len(logo) else ""
+            left = cell + " " * (logo_w - visible_len(cell)) + "   "
         lines.append(left + (right[i] if i < len(right) else ""))
 
     if roast and chosen:
@@ -841,7 +1185,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-n", "--roasts", type=int, default=5, metavar="N", help="how many roasts (default 5)")
     p.add_argument("--seed", type=int, help="pick the same roasts every time")
     p.add_argument("--no-roast", action="store_true", help="just the fetch, no feelings hurt")
-    p.add_argument("--no-logo", action="store_true", help="hide the penguin")
+    p.add_argument("--no-logo", action="store_true", help="hide the logo")
+    p.add_argument("--logo", metavar="DISTRO", help="show another distro's logo (any name fastfetch knows)")
+    p.add_argument("--pixel-logo", action="store_true", help="use roastfetch's own pixel-art logo")
     p.add_argument("--no-color", action="store_true", help="plain text")
     p.add_argument("--color", action="store_true", help="colors even when not printing to a terminal")
     p.add_argument("--demo", action="store_true", help="roast a made-up example system instead of yours")
@@ -856,7 +1202,8 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
     chosen = choose(roasts(facts, rng), max(0, args.roasts), rng)
     colour = args.color or (sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR"))
-    sys.stdout.write(render(facts, chosen, Paint(colour), not args.no_logo, not args.no_roast))
+    logo = args.logo or (facts["distro_id"] if args.demo else None)
+    sys.stdout.write(render(facts, chosen, Paint(colour), not args.no_logo, not args.no_roast, logo, args.pixel_logo))
     return 0
 
 

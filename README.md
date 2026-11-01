@@ -11,6 +11,12 @@ roastfetch
 
 Every run picks different jokes, so run it again until you get the one worth posting.
 
+## Your logo, on fire
+
+roastfetch shows **the same distro logo as your fastfetch or neofetch** (it asks them to draw it, so it matches
+exactly), with a little campfire underneath. No fetch tool installed? It draws its own pixel-art logo instead.
+Inside a distrobox or toolbox, it shows your host's logo.
+
 ## What gets roasted
 
 - **Your distro** (Arch, Ubuntu, Fedora, Bazzite, NixOS, Gentoo, Mint, Kali, … and a fallback for the obscure ones)
@@ -31,12 +37,14 @@ roastfetch -n 8          more roasts
 roastfetch --no-roast    just the fetch, no feelings hurt
 roastfetch --demo        roast a made-up system instead of yours
 roastfetch --seed 42     the same roasts every time
-roastfetch --no-logo     hide the penguin
+roastfetch --logo arch   borrow another distro's logo (any name fastfetch knows)
+roastfetch --pixel-logo  roastfetch's own pixel-art logo
+roastfetch --no-logo     hide the logo
 roastfetch --json        show what it found
 ```
 
 Want a fresh roast in every new terminal? Add `roastfetch` to the end of your `~/.bashrc`, `~/.zshrc` or `config.fish`.
-It runs in about 50 ms.
+It usually runs in under 100 ms.
 
 ## Privacy
 

@@ -96,6 +96,31 @@ class Roasts(unittest.TestCase):
         texts = " ".join(t for _, t in rf.roasts(dict(rf.DEMO, terminal="Claude"), random.Random(0)))
         self.assertIn("AI", texts)
 
+    def test_logo_falls_back_to_pixel_art_without_fetch_tools(self):
+        real_which = rf.shutil.which
+        rf.shutil.which = lambda name: None
+        try:
+            self.assertEqual(rf.borrowed_logo(None, False), [])
+            chosen = rf.choose(rf.roasts(dict(rf.DEMO), random.Random(1)), 3, random.Random(1))
+            out = rf.render(dict(rf.DEMO), chosen, rf.Paint(False), True, True)
+        finally:
+            rf.shutil.which = real_which
+        self.assertIn("\u2588", out)  # half-block pixel art drawn
+        self.assertIn("you@archbox", out)
+
+    def test_borrowed_logo_is_cleaned(self):
+        real_run, real_which = rf.run, rf.shutil.which
+        rf.shutil.which = lambda name: "/usr/bin/" + name
+        rf.run = lambda args, timeout=2: "\n\x1b[?25l\x1b[1m\x1b[34m  /\\\n /  \\\n/____\\\x1b[m\n\n"
+        try:
+            plain = rf.borrowed_logo("arch", False)
+            coloured = rf.borrowed_logo("arch", True)
+        finally:
+            rf.run, rf.shutil.which = real_run, real_which
+        self.assertEqual(plain, ["  /\\", " /  \\", "/____\\"])
+        self.assertTrue(all(line.endswith("\x1b[0m") for line in coloured))
+        self.assertNotIn("?25l", "".join(coloured))
+
     def test_vdf(self):
         d = rf.parse_vdf('"A" { "B" { "Playtime" "12" } }')
         self.assertEqual(d["a"]["b"]["playtime"], "12")
