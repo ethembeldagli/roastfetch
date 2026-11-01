@@ -1,0 +1,844 @@
+#!/usr/bin/env python3
+"""roastfetch: a system fetch that roasts you.
+
+Like neofetch or fastfetch, but after the specs it tells you what it really
+thinks. Zero dependencies, nothing leaves your machine, and it runs fast
+enough to live in your shell's startup file.
+"""
+
+from __future__ import annotations
+
+import argparse
+import datetime as dt
+import glob
+import json
+import os
+import platform
+import random
+import re
+import shutil
+import sqlite3
+import subprocess
+import sys
+import time
+
+__version__ = "0.1.0"
+HOME = os.path.expanduser("~")
+IN_BOX = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
+HOST = "/run/host" if IN_BOX and os.path.isdir("/run/host/etc") else ""
+
+
+# --- tiny helpers -------------------------------------------------------------
+
+def read(path: str, default: str = "") -> str:
+    try:
+        with open(path, encoding="utf-8", errors="replace") as f:
+            return f.read()
+    except OSError:
+        return default
+
+
+def run(args: list[str], timeout: float = 2) -> str:
+    if not shutil.which(args[0]):
+        return ""
+    try:
+        return subprocess.run(args, capture_output=True, text=True, timeout=timeout,
+                              stdin=subprocess.DEVNULL).stdout
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+
+def count_dirs(path: str) -> int:
+    try:
+        return sum(1 for e in os.scandir(path) if e.is_dir())
+    except OSError:
+        return 0
+
+
+def gib(kib: float) -> str:
+    return f"{kib / 1048576:.1f} GiB"
+
+
+# --- facts --------------------------------------------------------------------
+
+def os_release(root: str = "") -> dict:
+    out = {}
+    for line in read(f"{root}/etc/os-release").splitlines():
+        k, _, v = line.partition("=")
+        if k:
+            out[k.strip()] = v.strip().strip('"')
+    return out
+
+
+def parent_names() -> list[str]:
+    """Process names from our parent upwards (shell, terminal, ...)."""
+    names, pid = [], os.getppid()
+    for _ in range(8):
+        stat = read(f"/proc/{pid}/stat")
+        if not stat:
+            break
+        m = re.match(r"\d+ \((.*)\) \S (\d+)", stat)
+        if not m:
+            break
+        names.append(m.group(1))
+        pid = int(m.group(2))
+        if pid <= 1:
+            break
+    return names
+
+
+SHELLS = {"bash", "zsh", "fish", "nu", "dash", "ksh", "tcsh", "elvish", "xonsh", "sh"}
+TERMINALS = {
+    "gnome-terminal-": "GNOME Terminal", "gnome-terminal": "GNOME Terminal", "ptyxis": "Ptyxis",
+    "ptyxis-agent": "Ptyxis", "konsole": "Konsole", "kitty": "kitty", "alacritty": "Alacritty",
+    "wezterm-gui": "WezTerm", "foot": "foot", "ghostty": "Ghostty", "xterm": "xterm",
+    "tilix": "Tilix", "terminator": "Terminator", "xfce4-terminal": "Xfce Terminal",
+    "kgx": "Console", "blackbox": "Black Box", "code": "VS Code", "rio": "Rio",
+    "st": "st", "urxvt": "urxvt", "warp": "Warp", "yakuake": "Yakuake",
+}
+
+
+def detect_terminal(parents: list[str]) -> str:
+    for name in parents:
+        if name in TERMINALS:
+            return TERMINALS[name]
+    env = os.environ
+    if env.get("TERM_PROGRAM") == "vscode":
+        return "VS Code"
+    if env.get("TERM_PROGRAM"):
+        return env["TERM_PROGRAM"]
+    term = env.get("TERM", "")
+    for key, name in (("kitty", "kitty"), ("ghostty", "Ghostty"), ("alacritty", "Alacritty"), ("foot", "foot"),
+                      ("wezterm", "WezTerm")):
+        if key in term:
+            return name
+    if env.get("KONSOLE_VERSION"):
+        return "Konsole"
+    if env.get("PTYXIS_VERSION"):
+        return "Ptyxis"
+    if env.get("VTE_VERSION"):
+        return "a VTE terminal"
+    return ""
+
+
+def detect_desktop() -> str:
+    env = os.environ
+    for var, name in (("HYPRLAND_INSTANCE_SIGNATURE", "Hyprland"), ("NIRI_SOCKET", "niri"),
+                      ("SWAYSOCK", "Sway"), ("I3SOCK", "i3")):
+        if env.get(var):
+            return name
+    de = (env.get("XDG_CURRENT_DESKTOP") or env.get("DESKTOP_SESSION") or "").split(":")[-1]
+    return {"KDE": "KDE Plasma", "X-Cinnamon": "Cinnamon", "XFCE": "Xfce", "COSMIC": "COSMIC"}.get(de, de)
+
+
+def packages() -> dict:
+    counts: dict[str, int] = {}
+    for root, label in ((HOST, ""), ("", " in box")) if HOST else (("", ""),):
+        status = read(f"{root}/var/lib/dpkg/status")
+        if status:
+            counts["dpkg" + label] = status.count("Status: install ok installed")
+        for db in (f"{root}/usr/lib/sysimage/rpm/rpmdb.sqlite", f"{root}/var/lib/rpm/rpmdb.sqlite"):
+            if os.path.isfile(db):
+                try:
+                    con = sqlite3.connect(f"file:{db}?mode=ro&immutable=1", uri=True)
+                    counts["rpm" + label] = con.execute("SELECT count(*) FROM Packages").fetchone()[0]
+                    con.close()
+                    break
+                except sqlite3.Error:
+                    pass
+        n = count_dirs(f"{root}/var/lib/pacman/local")
+        if n:
+            counts["pacman" + label] = n
+    apps = set()
+    for base in (f"{HOST}/var/lib/flatpak/app", f"{HOME}/.local/share/flatpak/app"):
+        try:
+            apps.update(e.name for e in os.scandir(base) if e.is_dir())
+        except OSError:
+            pass
+    if apps:
+        counts["flatpak"] = len(apps)
+    snaps = [d for d in glob.glob(f"{HOST}/snap/*") if os.path.basename(d) not in ("bin", "README")]
+    if snaps:
+        counts["snap"] = len(snaps)
+    n = count_dirs("/home/linuxbrew/.linuxbrew/Cellar") or count_dirs(f"{HOST}/var/home/linuxbrew/.linuxbrew/Cellar")
+    if n:
+        counts["brew"] = n
+    return counts
+
+
+def gpus() -> list[str]:
+    names = []
+    out = run(["lspci", "-mm"])
+    for line in out.splitlines():
+        if re.search(r'"(VGA compatible controller|3D controller|Display controller)"', line):
+            parts = re.findall(r'"([^"]*)"', line)
+            if len(parts) >= 3:
+                vendor = parts[1]
+                for long, short in (("Advanced Micro Devices", "AMD"), ("NVIDIA", "NVIDIA"), ("Intel", "Intel")):
+                    if long in vendor:
+                        vendor = short
+                model = re.sub(r".*\[(.*)\].*", r"\1", parts[2])
+                names.append(f"{vendor} {model}".strip())
+    if not names:  # no lspci: at least the vendor
+        for vfile in glob.glob("/sys/class/drm/card*/device/vendor"):
+            vendor = {"0x10de": "NVIDIA", "0x1002": "AMD", "0x8086": "Intel"}.get(read(vfile).strip())
+            if vendor and vendor not in names:
+                names.append(vendor)
+    return names
+
+
+def battery() -> int | None:
+    for bat in glob.glob("/sys/class/power_supply/BAT*"):
+        for full, design in (("energy_full", "energy_full_design"), ("charge_full", "charge_full_design")):
+            try:
+                f, d = int(read(f"{bat}/{full}") or 0), int(read(f"{bat}/{design}") or 0)
+            except ValueError:
+                continue
+            if f and d:
+                return round(100 * f / d)
+    return None
+
+
+SKIP_WORDS = {"do", "done", "then", "fi", "else", "esac", "in", "for", "while", "if", "case", "function"}
+TYPOS = {"sl": "ls", "gti": "git", "got": "git", "claer": "clear", "celar": "clear", "cler": "clear",
+         "pyhton": "python", "pytohn": "python", "sudp": "sudo", "suod": "sudo", "grpe": "grep", "gerp": "grep",
+         "mkae": "make", "ehco": "echo", "exti": "exit", "cd..": "cd ..", "nnao": "nano", "vmi": "vim"}
+
+
+def history() -> dict:
+    lines: list[str] = []
+    timed = False
+    bash = read(os.environ.get("HISTFILE") or f"{HOME}/.bash_history")
+    for line in bash.splitlines():
+        if re.fullmatch(r"#\d{9,11}", line):
+            timed = True
+        elif line.strip():
+            lines.append(line)
+    for path in (f"{HOME}/.zsh_history", f"{HOME}/.zhistory", f"{HOME}/.histfile"):
+        for line in read(path).splitlines():
+            m = re.match(r": \d+:\d+;(.*)", line)
+            if m:
+                timed = True
+            lines.append(m.group(1) if m else line)
+    for line in read(f"{HOME}/.local/share/fish/fish_history").splitlines():
+        if line.startswith("- cmd: "):
+            lines.append(line[7:])
+            timed = True
+    if not lines:
+        return {}
+    counts: dict[str, int] = {}
+    sudo = clears = 0
+    typos: dict[str, int] = {}
+    for line in lines:
+        for part in re.split(r"\|\||&&|[|;]", line):
+            words = part.split()
+            while words and (re.match(r"^\w+=", words[0]) or words[0] in ("sudo", "doas", "run0", "time", "env", "nohup")):
+                if words[0] in ("sudo", "doas", "run0"):
+                    sudo += 1
+                words = words[1:]
+                while words and words[0].startswith("-"):
+                    words = words[1:]
+            if not words:
+                continue
+            cmd = os.path.basename(words[0])
+            if cmd in TYPOS and not shutil.which(cmd):
+                typos[cmd] = typos.get(cmd, 0) + 1
+                continue
+            if cmd in SKIP_WORDS or not re.fullmatch(r"[a-z][a-z0-9._+-]{0,30}", cmd):
+                continue
+            counts[cmd] = counts.get(cmd, 0) + 1
+            if cmd in ("clear", "cls", "reset"):
+                clears += 1
+    top = sorted(counts.items(), key=lambda kv: -kv[1])
+    return {
+        "total": len(lines), "timed": timed, "sudo": sudo, "clears": clears,
+        "top": top[0][0] if top else "", "top_n": top[0][1] if top else 0,
+        "typo": max(typos.items(), key=lambda kv: kv[1]) if typos else None,
+    }
+
+
+_VDF = re.compile(r'"((?:[^"\\]|\\.)*)"|([{}])')
+
+
+def parse_vdf(text: str) -> dict:
+    root: dict = {}
+    stack, key = [root], None
+    for m in _VDF.finditer(text):
+        s, brace = m.group(1), m.group(2)
+        if brace == "{":
+            child: dict = {}
+            if key is not None:
+                stack[-1][key.lower()] = child
+            stack.append(child)
+            key = None
+        elif brace == "}":
+            if len(stack) > 1:
+                stack.pop()
+            key = None
+        elif key is None:
+            key = s
+        else:
+            stack[-1][key.lower()] = s
+            key = None
+    return root
+
+
+def steam() -> dict:
+    roots = {os.path.realpath(os.path.expanduser(p)) for p in (
+        "~/.local/share/Steam", "~/.steam/steam", "~/.var/app/com.valvesoftware.Steam/.local/share/Steam",
+        "~/snap/steam/common/.local/share/Steam") if os.path.isdir(os.path.expanduser(p))}
+    minutes: dict[str, int] = {}
+    names: dict[str, str] = {}
+    for root in roots:
+        for acf in glob.glob(f"{root}/steamapps/appmanifest_*.acf"):
+            st = parse_vdf(read(acf)).get("appstate", {})
+            if st.get("appid") and st.get("name"):
+                names[st["appid"]] = st["name"]
+        for cfg in glob.glob(f"{root}/userdata/*/config/localconfig.vdf"):
+            apps = parse_vdf(read(cfg))
+            for k in ("userlocalconfigstore", "software", "valve", "steam", "apps"):
+                apps = apps.get(k, {}) if isinstance(apps, dict) else {}
+            for appid, info in apps.items():
+                playtime = str(info.get("playtime", "")) if isinstance(info, dict) else ""
+                if playtime.isdigit():
+                    minutes[appid] = max(minutes.get(appid, 0), int(playtime))
+    played = {a: m for a, m in minutes.items() if m > 0 and not re.match(r"Proton|Steam Linux Runtime", names.get(a, ""))}
+    if not played:
+        return {}
+    top = max((a for a in played if a in names), key=lambda a: played[a], default=None)
+    return {"hours": sum(played.values()) // 60, "games": len(played),
+            "top": names.get(top, ""), "top_hours": played[top] // 60 if top else 0}
+
+
+def home_age_days() -> int | None:
+    out = run(["stat", "-c", "%W", HOME]).strip()
+    if out.isdigit() and int(out) > 0:
+        return int((time.time() - int(out)) // 86400)
+    return None
+
+
+def safe(fn, default):
+    """A fetch must never crash: a broken source just drops its line."""
+    try:
+        return fn()
+    except Exception:
+        return default
+
+
+def collect() -> dict:
+    rel = os_release(HOST) if HOST else os_release()
+    box = os_release() if HOST else {}
+    parents = parent_names()
+    shell = next((p for p in parents if p in SHELLS), os.path.basename(os.environ.get("SHELL", "")))
+    mem = dict(re.findall(r"^(\w+):\s+(\d+)", read("/proc/meminfo"), re.M))
+    total, avail = int(mem.get("MemTotal", 0)), int(mem.get("MemAvailable", 0))
+    disk = os.statvfs(HOME)
+    disk_total = disk.f_blocks * disk.f_frsize
+    disk_used = disk_total - disk.f_bavail * disk.f_frsize
+    cpu = re.search(r"^model name\s*:\s*(.+)$", read("/proc/cpuinfo"), re.M)
+    product = read("/sys/class/dmi/id/product_name").strip()
+    if "O.E.M" in product or product.lower() in ("system product name", "default string"):
+        product = ""
+    vendor = read("/sys/class/dmi/id/sys_vendor").strip()
+    vendor = "" if "O.E.M" in vendor else vendor.replace("ASUSTeK COMPUTER INC.", "ASUS")
+    return {
+        "user": os.environ.get("USER") or os.path.basename(HOME),
+        "hostname": platform.node(),
+        "distro": rel.get("PRETTY_NAME") or rel.get("NAME") or "Linux",
+        "distro_id": rel.get("ID", "linux"),
+        "distro_like": rel.get("ID_LIKE", ""),
+        "variant": rel.get("VARIANT_ID", ""),
+        "atomic": os.path.exists(f"{HOST}/run/ostree-booted") or os.path.exists("/run/ostree-booted"),
+        "box": (box.get("PRETTY_NAME", "a container") if IN_BOX else ""),
+        "model": re.sub(r"\s+[A-Z0-9]{4,}(_[A-Z0-9]+)+$", "", f"{vendor} {product}".strip()) if product else "",
+        "kernel": platform.release(),
+        "uptime_s": float((read("/proc/uptime") or "0").split()[0]),
+        "packages": safe(packages, {}),
+        "shell": shell,
+        "ohmyzsh": os.path.isdir(f"{HOME}/.oh-my-zsh"),
+        "starship": bool(os.environ.get("STARSHIP_SHELL") or os.environ.get("STARSHIP_SESSION_KEY")),
+        "desktop": detect_desktop(),
+        "session": os.environ.get("XDG_SESSION_TYPE", ""),
+        "terminal": detect_terminal(parents),
+        "cpu": re.sub(r"\s+", " ", re.sub(r"\((R|TM)\)|CPU|Processor|\d+-Core", "", cpu.group(1))).strip() if cpu else "",
+        "threads": os.cpu_count() or 1,
+        "gpus": safe(gpus, []),
+        "mem_total_kib": total, "mem_used_kib": total - avail,
+        "disk_total": disk_total, "disk_used": disk_used,
+        "battery_health": safe(battery, None),
+        "editor": os.path.basename((os.environ.get("VISUAL") or os.environ.get("EDITOR") or "").split(" ")[0]),
+        "history": safe(history, {}),
+        "steam": safe(steam, {}),
+        "home_age_days": safe(home_age_days, None),
+        "hour": dt.datetime.now().hour,
+    }
+
+
+DEMO = {  # a made-up system for screenshots and for people who'd rather not be roasted
+    "user": "you", "hostname": "archbox", "distro": "Arch Linux", "distro_id": "arch", "distro_like": "",
+    "variant": "", "atomic": False, "box": "", "model": "Lenovo Legion 5 Pro", "kernel": "6.17.8-zen1-1-zen",
+    "uptime_s": 39 * 86400 + 5 * 3600, "packages": {"pacman": 1842, "flatpak": 3}, "shell": "zsh",
+    "ohmyzsh": True, "starship": False, "desktop": "Hyprland", "session": "wayland", "terminal": "kitty",
+    "cpu": "AMD Ryzen 7 7840HS", "threads": 16, "gpus": ["AMD Radeon 780M", "NVIDIA GeForce RTX 4070 Laptop"],
+    "mem_total_kib": 16 * 1048576, "mem_used_kib": int(13.6 * 1048576),
+    "disk_total": 476 * 2**30, "disk_used": 455 * 2**30, "battery_health": 74, "editor": "nvim",
+    "history": {"total": 18432, "timed": True, "sudo": 2210, "clears": 512, "top": "git", "top_n": 4021,
+                "typo": ("gti", 37)},
+    "steam": {"hours": 1312, "games": 87, "top": "Elden Ring", "top_hours": 402},
+    "home_age_days": 1100, "hour": 2,
+}
+
+
+# --- the roast ---------------------------------------------------------------
+
+DISTRO_ROASTS = {
+    "arch": ["I use Arch btw. Yes, we know. You've mentioned it.",
+             "Arch: you read the wiki more than you use the computer.",
+             "Rolling release, rolling eyes."],
+    "endeavouros": ["EndeavourOS: Arch, but you wanted a GUI installer and some dignity."],
+    "manjaro": ["Manjaro: Arch, but the breakage arrives two weeks late."],
+    "cachyos": ["CachyOS: you recompiled the world for x86-64-v3 to gain 2 FPS."],
+    "garuda": ["Garuda: an operating system that is mostly RGB."],
+    "ubuntu": ["Ubuntu in this economy? Brave of you to admit it.",
+               "Ubuntu: Linux with training wheels and snaps nobody asked for."],
+    "pop": ["Pop!_OS: you picked it for the NVIDIA ISO. We see you."],
+    "linuxmint": ["Linux Mint: Windows XP's spiritual successor.",
+                  "Linux Mint: the distro your dad would install. Respectfully."],
+    "debian": ["Debian stable: your packages remember a simpler time.", "Debian: stable like a fossil."],
+    "fedora": ["Fedora: unpaid beta tester for Red Hat.",
+               "Fedora: you like your software fresh and your SELinux angry."],
+    "bazzite": ["Bazzite: you installed a gaming distro to spend all day in the terminal.",
+                "Bazzite: your OS is immutable. So is your Steam backlog."],
+    "aurora": ["Aurora: an immutable desktop, for someone who clearly can't be trusted."],
+    "bluefin": ["Bluefin: a dinosaur mascot, and you still feel modern."],
+    "nixos": ["NixOS: 400 lines of config to install Firefox.",
+              "NixOS: reproducible builds, irreproducible sanity."],
+    "gentoo": ["Gentoo: still compiling since breakfast.", "Gentoo: your CPU fan is the loudest thing in the house."],
+    "void": ["Void Linux: you just wanted to skip the systemd argument, right?"],
+    "alpine": ["Alpine on a desktop. Who hurt you?"],
+    "opensuse-tumbleweed": ["openSUSE: YaST another config tool."],
+    "opensuse-leap": ["openSUSE: YaST another config tool."],
+    "kali": ["Kali as a daily driver. The van outside is concerned.",
+             "Kali Linux: you watched one hacker movie, didn't you?"],
+    "zorin": ["Zorin OS: Linux dressed as Windows for Halloween."],
+    "elementary": ["elementary OS: macOS cosplay."],
+    "steamos": ["SteamOS: you bought a console and keep calling it a PC."],
+    "rhel": ["Enterprise Linux at home. Do you wear a tie to bed?"],
+    "rocky": ["Enterprise Linux at home. Do you wear a tie to bed?"],
+    "almalinux": ["Enterprise Linux at home. Do you wear a tie to bed?"],
+    "raspbian": ["Raspberry Pi OS: a computer the size of a sandwich, and it shows."],
+}
+DESKTOP_ROASTS = {
+    "gnome": ["GNOME: three extensions just to get a minimize button.", "GNOME: the designers know best. Apparently."],
+    "kde plasma": ["KDE Plasma: 600 settings, and you changed the wallpaper.",
+                   "Plasma: your panel has more widgets than your fridge has magnets."],
+    "hyprland": ["Hyprland: your config has more animations than your weekends.",
+                 "Hyprland: the dotfiles took longer than your degree."],
+    "sway": ["Sway: i3, but you wanted Wayland bragging rights."],
+    "i3": ["i3: dragging windows with a mouse is for peasants, apparently."],
+    "niri": ["niri: scrolling tiling, because normal tiling was too mainstream."],
+    "xfce": ["Xfce: 2009 called. It wants its panel back."],
+    "cinnamon": ["Cinnamon: a cardigan, but as a desktop."],
+    "cosmic": ["COSMIC: you run brand-new desktops in production. Respect."],
+    "lxqt": ["LXQt: saving RAM like it's 2004."],
+    "budgie": ["Budgie: a desktop named after a small bird. Fitting."],
+    "dwm": ["dwm: you patch C code to change a color."],
+}
+TERMINAL_ROASTS = {
+    "GNOME Terminal": ["The default terminal. Living on the edge, I see."],
+    "Ptyxis": ["Ptyxis: you didn't choose the terminal. The terminal chose you."],
+    "Console": ["GNOME Console: a terminal so minimal it forgot settings."],
+    "Konsole": ["Konsole, with seven split panes you never close."],
+    "kitty": ["kitty: a GPU-accelerated terminal, for running ls."],
+    "Alacritty": ["Alacritty: blazing fast, and you still run tmux inside it."],
+    "WezTerm": ["WezTerm: configured in Lua, because of course it is."],
+    "foot": ["foot: you picked a terminal by reading benchmarks."],
+    "Ghostty": ["Ghostty: you switched the day it launched. Don't lie."],
+    "xterm": ["xterm in this decade? Are you a museum?"],
+    "VS Code": ["Running a fetch inside VS Code's terminal. Nobody's impressed."],
+    "Tilix": ["Tilix: tiling inside your terminal inside your tiling."],
+}
+SHELL_ROASTS = {
+    "bash": ["bash: the default. A bold choice to make no choice.", "bash: you'll switch to zsh 'next weekend'."],
+    "zsh": ["zsh: you installed it for the themes. Admit it."],
+    "fish": ["fish: autosuggestions doing your thinking for you."],
+    "nu": ["Nushell: your pipes return tables now. Feeling fancy?"],
+}
+EDITOR_ROASTS = {
+    "nano": ["$EDITOR is nano. Ctrl+X, Y, Enter. A sacred ritual."],
+    "vim": ["$EDITOR is vim. You've been trying to exit since 2019."],
+    "vi": ["$EDITOR is vi. Bold, for someone who can't exit it."],
+    "nvim": ["$EDITOR is Neovim. Your init.lua has a changelog."],
+    "emacs": ["$EDITOR is Emacs: a lovely OS, lacking only a decent editor."],
+    "code": ["$EDITOR is VS Code. From a terminal tool. Cute."],
+    "hx": ["$EDITOR is Helix. You like your modes post-modern."],
+    "micro": ["$EDITOR is micro. Sensible. Suspiciously sensible."],
+}
+TOP_COMMANDS = {
+    "ls": "Your most-used command is ls. You really like looking at your files.",
+    "cd": "Your most-used command is cd. Always on the move, never arriving.",
+    "git": "Your most-used command is git. Commit messages: 'fix', 'fix2', 'fix final'.",
+    "clear": "Your most-used command is clear. Hiding the evidence?",
+    "grep": "Your most-used command is grep. Always searching for something. Love, maybe?",
+    "sudo": "Your most-used command is sudo. Root is not a personality.",
+    "cat": "Your most-used command is cat. Meow.",
+    "nano": "Your most-used command is nano. Bold.",
+    "vim": "Your most-used command is vim. Did you ever leave?",
+    "flatpak": "Your most-used command is flatpak. Sandboxed and proud.",
+    "systemctl": "Your most-used command is systemctl. You talk to systemd more than to people.",
+    "neofetch": "Your most-used command is neofetch. You're in the right place.",
+    "fastfetch": "Your most-used command is fastfetch. You're in the right place.",
+}
+FLAVOURS = ("zen", "xanmod", "liquorix", "lqx", "cachyos", "ogc", "tkg", "-rt", "clear")
+HANDHELDS = [  # (pattern, roast) for gaming handhelds, checked before laptops
+    (r"Xbox Ally", "An Xbox handheld running Linux. Somewhere in Redmond, a disturbance."),
+    (r"ROG Ally", "A ROG Ally running Linux. You fixed Windows by deleting it."),
+    (r"Legion Go", "A Legion Go in terminal mode. The detachable controllers are judging you."),
+    (r"Claw", "An MSI Claw running Linux. Bold, for a handheld that barely ran Windows."),
+    (r"Jupiter|Galileo|Steam Deck", "A fetch on a Steam Deck. The games are in the other mode."),
+    (r"AYANEO|GPD|ONEXPLAYER|AOKZOE", "You imported a handheld gaming PC to type in a terminal."),
+]
+GAMING_LAPTOPS = ("ROG", "TUF", "Legion", "Alienware", "Predator", "Nitro", "OMEN", "Victus", "Katana", "Raider")
+
+
+def a(word: str) -> str:
+    """'a' or 'an' + word."""
+    return ("an " if word[:1].lower() in "aeiou" else "a ") + word
+
+
+def pick(rng: random.Random, options: list[str]) -> str:
+    return rng.choice(options)
+
+
+def roasts(f: dict, rng: random.Random) -> list[tuple[int, str]]:
+    """Candidate roasts as (heat, text). Heat decides what makes the cut."""
+    out: list[tuple[int, str]] = []
+    add = lambda heat, text: out.append((heat, text))  # noqa: E731
+
+    did = f["distro_id"]
+    options = DISTRO_ROASTS.get(did) or next(
+        (DISTRO_ROASTS[x] for x in f["distro_like"].split() if x in DISTRO_ROASTS), None)
+    add(5, pick(rng, options) if options else f"{f['distro']}: so niche even DistroWatch blinked.")
+    if f["atomic"] and did not in ("bazzite", "aurora", "bluefin"):
+        add(2, "An immutable OS. Finally, something you can't break. Probably.")
+    if f["box"]:
+        add(4, pick(rng, [f"Running this inside {f['box']} on {f['distro']}. Matryoshka computing.",
+                          f"A{a(f['box'])[1:]} box on {f['distro']}. You put Linux in your Linux.",
+                          "Fetching from inside a container. Even your terminal needs a safe space."]))
+
+    model = f["model"]
+    handheld = next((h for h in HANDHELDS if re.search(h[0], model, re.I)), None)
+    if handheld:
+        add(5, handheld[1].format(model=model))
+    elif any(k.lower() in model.lower() for k in GAMING_LAPTOPS):
+        add(3, f"{model}: an RGB keyboard with a laptop attached.")
+    elif "ThinkPad" in model:
+        add(2, "A ThinkPad running Linux. The least surprising thing on this screen.")
+    elif "MacBook" in model:
+        add(4, "Linux on a MacBook. Somewhere in Cupertino, a disturbance.")
+    elif "Framework" in model:
+        add(3, "Framework laptop: repairable hardware, unrepairable dotfiles.")
+
+    k = f["kernel"].lower()
+    flavour = next((x.strip("-") for x in FLAVOURS if x in k), "")
+    if flavour:
+        add(3, f"A custom kernel ({flavour}). Gained 1 FPS, lost a weekend.")
+    major = re.match(r"(\d+)\.(\d+)", f["kernel"])
+    if major and int(major.group(1)) < 6:
+        add(4, f"Kernel {major.group(0)}. Older than some of your memes.")
+
+    days = f["uptime_s"] / 86400
+    if days >= 30:
+        add(4, pick(rng, [f"Up {int(days)} days. Kernel updates are knocking. Loudly.",
+                          f"{int(days)} days of uptime. That's not stability, that's fear of rebooting."]))
+    elif days >= 7:
+        add(2, f"Up {int(days)} days. The reboot button misses you.")
+    elif f["uptime_s"] < 600:
+        add(3, f"Booted {int(f['uptime_s'] // 60)} minutes ago. What did you break?")
+
+    pk = f["packages"]
+    native = sum(v for k2, v in pk.items() if k2.split()[0] in ("rpm", "dpkg", "pacman") and "box" not in k2)
+    if pk.get("flatpak", 0) >= 40:
+        add(4, pick(rng, [f"{pk['flatpak']} Flatpaks, each with its own runtime. Your SSD is crying.",
+                          f"{pk['flatpak']} Flatpaks. Flathub should send you a loyalty card.",
+                          f"{pk['flatpak']} Flatpaks and at least six copies of GTK. Efficient."]))
+    elif pk.get("flatpak", 0) >= 15:
+        add(2, f"{pk['flatpak']} Flatpaks. Sandboxes all the way down.")
+    if native >= 3000:
+        add(3, f"{native:,} packages. You install things the way other people breathe.")
+    if pk.get("snap", 0) >= 5:
+        add(3, f"{pk['snap']} snaps. Slow startup is a lifestyle choice.")
+    if pk.get("brew"):
+        add(2, f"Homebrew on Linux with {pk['brew']} formulae. A stranger in a strange land.")
+
+    shell = f["shell"]
+    if shell == "zsh" and f["ohmyzsh"]:
+        add(3, "oh-my-zsh: 400 ms of startup time for a git branch name.")
+    elif shell in SHELL_ROASTS:
+        add(2, pick(rng, SHELL_ROASTS[shell]))
+    if f["starship"]:
+        add(2, "A Starship prompt: two lines tall, showing a Node version you don't use.")
+
+    de = f["desktop"].lower()
+    if de in DESKTOP_ROASTS:
+        add(3, pick(rng, DESKTOP_ROASTS[de]))
+    elif not de and not f["box"]:
+        add(3, "No desktop at all. Just you and the TTY. Hardcore.")
+    if f["session"] == "x11" and de not in ("i3", "dwm", "xfce"):
+        add(2, "Still on X11. Wayland's been ready for years, apparently.")
+
+    if f["terminal"] in TERMINAL_ROASTS:
+        add(2, pick(rng, TERMINAL_ROASTS[f["terminal"]]))
+
+    gpu = " ".join(f["gpus"]).lower()
+    if "nvidia" in gpu and ("intel" in gpu or "amd" in gpu):
+        add(4, "Hybrid graphics: one GPU works, the other one judges you.")
+    elif "nvidia" in gpu:
+        add(4, pick(rng, ["NVIDIA on Linux. You enjoy suffering, don't you?",
+                          "NVIDIA: installing the driver was your whole personality for a week."]))
+    elif "amd" in gpu or "radeon" in gpu:
+        add(1, "AMD graphics: Mesa does all the work, you take all the credit.")
+    elif "intel" in gpu:
+        add(2, "Intel graphics. Gaming? In this economy?")
+
+    cpu = f["cpu"].lower()
+    if f["threads"] >= 24:
+        add(2, f"{f['threads']} threads to run a terminal. Overkill is your love language.")
+    elif f["threads"] <= 4:
+        add(3, f"{f['threads']} threads. Your compiler sends its regards.")
+    elif "intel" in cpu:
+        add(1, "An Intel CPU: a space heater with benefits.")
+
+    total_gib = f["mem_total_kib"] / 1048576
+    used_pct = 100 * f["mem_used_kib"] / max(1, f["mem_total_kib"])
+    if total_gib and total_gib <= 8.5:
+        add(3, f"{total_gib:.0f} GiB of RAM and a web browser. Choose one.")
+    elif total_gib >= 60:
+        add(2, f"{total_gib:.0f} GiB of RAM. Planning to open every tab ever?")
+    if used_pct >= 80:
+        add(3, f"{used_pct:.0f}% of your RAM is in use. Browser tabs breed when you're not looking.")
+
+    disk_pct = 100 * f["disk_used"] / max(1, f["disk_total"])
+    if disk_pct >= 90:
+        add(4, pick(rng, [f"Disk {disk_pct:.0f}% full. Collecting ISOs like Pokémon?",
+                          f"Disk {disk_pct:.0f}% full. One more game update and it's over."]))
+    elif disk_pct >= 75:
+        add(3, pick(rng, [f"Disk {disk_pct:.0f}% full. ~/Downloads is a lifestyle, apparently.",
+                          f"Disk {disk_pct:.0f}% full. Shader caches are people too, I guess."]))
+
+    if f["battery_health"] is not None and f["battery_health"] < 80:
+        add(3, f"Battery at {f['battery_health']}% of its original capacity. It's tired. So are we.")
+
+    ed = f["editor"]
+    if ed in EDITOR_ROASTS:
+        add(2, EDITOR_ROASTS[ed][0])
+    elif not ed:
+        add(2, "No $EDITOR set. Git will open vi one day and you will panic.")
+
+    h = f["history"]
+    if h:
+        if h["typo"]:
+            typo, n = h["typo"]
+            times = f"{n} time{'s' if n != 1 else ''}"
+            add(4, pick(rng, [f"You typed `{typo}` {times}. Autocorrect can't save you here.",
+                              f"`{typo}`, {times}. Your fingers have a mind of their own."]))
+        if h["sudo"] >= 20 and h["sudo"] / max(1, h["total"]) > 0.08:
+            add(4, pick(rng, [f"{h['sudo']} sudos in your history. Root is not a personality.",
+                              f"{h['sudo']} sudos. You and root should get a room."]))
+        if h["clears"] >= 25:
+            add(3, f"You cleared the screen {h['clears']} times. Hiding something?")
+        if h["top"] in TOP_COMMANDS:
+            add(2, TOP_COMMANDS[h["top"]])
+        if h["total"] < 60:
+            add(3, f"Only {h['total']} commands in your history. Terminal tourist?")
+        elif h["total"] > 20000:
+            add(3, f"{h['total']:,} commands in your history. Do you ever go outside?")
+
+    s = f["steam"]
+    if s.get("top") and s.get("top_hours", 0) >= 100:
+        add(4, pick(rng, [f"{s['top_hours']}h in {s['top']}. Touching grass is free, you know.",
+                          f"{s['top_hours']}h in {s['top']}. That's {s['top_hours'] // 24} full days. Worth it?",
+                          f"{s['top']} has {s['top_hours']}h of your life. It's not giving them back."]))
+    elif s.get("hours", 0) >= 300:
+        add(3, f"{s['hours']} hours on Steam. That's {s['hours'] // 24} days. Worth it?")
+
+    age = f["home_age_days"]
+    if age is not None and age < 45:
+        add(3, pick(rng, [f"Your home folder is {age} days old. Distro-hopper detected.",
+                          f"Fresh install, {age} days ago. How long until the next one?"]))
+
+    if f["hour"] < 5:
+        add(4, pick(rng, [f"It's {f['hour'] or 12} AM and you're running roastfetch. Go to sleep.",
+                          f"{f['hour'] or 12} AM. Your sleep schedule has a segfault."]))
+
+    add(1, pick(rng, ["You ran a program whose only job is to insult you. Interesting choice.",
+                      "You installed a tool to roast you. Therapy is cheaper.",
+                      "Screenshotting this for Reddit, aren't you?"]))
+    return out
+
+
+def choose(cands: list[tuple[int, str]], n: int, rng: random.Random) -> list[tuple[int, str]]:
+    ranked = sorted(cands, key=lambda c: c[0] + rng.random() * 1.5, reverse=True)
+    return ranked[:n]
+
+
+def verdict(chosen: list[tuple[int, str]]) -> tuple[str, int]:
+    heat = sum(h for h, _ in chosen)
+    score = max(1, min(10, round(10 * heat / (5 * max(1, len(chosen))))))
+    level = ("Rare" if score <= 3 else "Medium" if score <= 6 else "Well done" if score <= 8 else "Charcoal")
+    return level, score
+
+
+# --- drawing -----------------------------------------------------------------
+
+LOGO = [  # a penguin, roasting
+    "     .---.    ",
+    "    / o o \\   ",
+    "    \\  v  /   ",
+    "   /`-----`\\  ",
+    "  |  |   |  | ",
+    "   \\_|___|_/  ",
+    "    (  )  (   ",
+    "   ) (  ) )   ",
+    "  (_)_(_)(_)  ",
+]
+LOGO_PENGUIN_ROWS = 6
+ACCENTS = {
+    "arch": "#1793d1", "endeavouros": "#7f3fbf", "manjaro": "#35bf5c", "cachyos": "#00b4d8", "garuda": "#ff4d6d",
+    "ubuntu": "#e95420", "pop": "#48b9c7", "linuxmint": "#87cf3e", "debian": "#d70a53", "fedora": "#51a2da",
+    "bazzite": "#a66cff", "aurora": "#5aa9ff", "bluefin": "#4c8cff", "nixos": "#7ebae4", "gentoo": "#9a8fe8",
+    "void": "#478061", "alpine": "#4c9bd6", "opensuse-tumbleweed": "#73ba25", "opensuse-leap": "#73ba25",
+    "kali": "#367bf0", "zorin": "#15a6f0", "elementary": "#64baff", "steamos": "#1a9fff",
+}
+FLAME = ["#ff3b30", "#ff8a00", "#ffd60a"]
+
+
+class Paint:
+    def __init__(self, enabled: bool):
+        self.on = enabled
+        self.true = os.environ.get("COLORTERM", "").lower() in ("truecolor", "24bit")
+
+    def __call__(self, text: str, colour: str | None = None, bold: bool = False, dim: bool = False) -> str:
+        if not self.on:
+            return text
+        codes = []
+        if bold:
+            codes.append("1")
+        if dim:
+            codes.append("2")
+        if colour:
+            r, g, b = (int(colour[i:i + 2], 16) for i in (1, 3, 5))
+            if self.true:
+                codes.append(f"38;2;{r};{g};{b}")
+            else:
+                q = lambda v: 0 if v < 48 else 1 if v < 115 else (v - 35) // 40  # noqa: E731
+                codes.append(f"38;5;{16 + 36 * q(r) + 6 * q(g) + q(b)}")
+        return f"\x1b[{';'.join(codes)}m{text}\x1b[0m" if codes else text
+
+
+def fmt_uptime(sec: float) -> str:
+    d, rem = divmod(int(sec), 86400)
+    h, m = rem // 3600, rem % 3600 // 60
+    return ", ".join(p for p in (f"{d}d" if d else "", f"{h}h" if h else "", f"{m}m") if p)
+
+
+def info_lines(f: dict) -> list[tuple[str, str]]:
+    rows = [("OS", f["distro"] + (" (atomic)" if f["atomic"] else ""))]
+    if f["box"]:
+        rows.append(("Box", f["box"]))
+    if f["model"]:
+        rows.append(("Host", f["model"]))
+    rows.append(("Kernel", f["kernel"]))
+    rows.append(("Uptime", fmt_uptime(f["uptime_s"])))
+    if f["packages"]:
+        rows.append(("Packages", ", ".join(f"{v:,} ({k})" for k, v in f["packages"].items())))
+    if f["shell"]:
+        rows.append(("Shell", f["shell"]))
+    if f["desktop"]:
+        rows.append(("Desktop", f["desktop"] + (f" ({f['session'].capitalize()})" if f["session"] else "")))
+    if f["terminal"]:
+        rows.append(("Terminal", f["terminal"]))
+    if f["cpu"]:
+        rows.append(("CPU", f"{f['cpu']} ({f['threads']})"))
+    for i, g in enumerate(f["gpus"][:2]):
+        rows.append(("GPU", g))
+    if f["mem_total_kib"]:
+        rows.append(("Memory", f"{gib(f['mem_used_kib'])} / {gib(f['mem_total_kib'])}"))
+    if f["disk_total"]:
+        rows.append(("Disk", f"{f['disk_used'] / 2**30:.0f} / {f['disk_total'] / 2**30:.0f} GiB "
+                             f"({100 * f['disk_used'] / f['disk_total']:.0f}%)"))
+    if f["battery_health"] is not None:
+        rows.append(("Battery", f"{f['battery_health']}% health"))
+    if f["steam"].get("hours"):
+        rows.append(("Steam", f"{f['steam']['hours']:,}h across {f['steam']['games']} games"))
+    return rows
+
+
+def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool, roast: bool) -> str:
+    accent = ACCENTS.get(f["distro_id"]) or next(
+        (ACCENTS[x] for x in f["distro_like"].split() if x in ACCENTS), "#ffb000")
+    width = shutil.get_terminal_size((100, 24)).columns
+    title = f"{f['user']}@{f['hostname']}"
+    right = [paint(title, accent, bold=True), paint("─" * len(title), dim=True)]
+    rows = info_lines(f)
+    key_w = max(len(k) for k, _ in rows)
+    for key, value in rows:
+        right.append(f"{paint(key.ljust(key_w), accent, bold=True)}  {value}")
+
+    logo_w = len(LOGO[0])
+    use_logo = show_logo and width >= 60
+    lines = []
+    for i in range(max(len(right), len(LOGO) if use_logo else 0)):
+        left = ""
+        if use_logo:
+            if i < len(LOGO):
+                colour = "#e8e8e8" if i < LOGO_PENGUIN_ROWS else FLAME[i - LOGO_PENGUIN_ROWS]
+                left = paint(LOGO[i], colour, bold=i >= LOGO_PENGUIN_ROWS)
+            else:
+                left = " " * logo_w
+            left += "  "
+        lines.append(left + (right[i] if i < len(right) else ""))
+
+    if roast and chosen:
+        lines.append("")
+        lines.append(paint("  roasted:", FLAME[0], bold=True))
+        for _, text in chosen:
+            lines.append(f"  {paint('›', FLAME[1], bold=True)} {text}")
+        level, score = verdict(chosen)
+        bar = paint("▰" * score, FLAME[1]) + paint("▱" * (10 - score), dim=True)
+        lines.append("")
+        lines.append(f"  {paint('Doneness:', FLAME[2], bold=True)} {level} {bar} {score}/10")
+    return "\n".join(lines) + "\n"
+
+
+def main(argv: list[str] | None = None) -> int:
+    p = argparse.ArgumentParser(prog="roastfetch", description="A system fetch that roasts you.")
+    p.add_argument("-n", "--roasts", type=int, default=5, metavar="N", help="how many roasts (default 5)")
+    p.add_argument("--seed", type=int, help="pick the same roasts every time")
+    p.add_argument("--no-roast", action="store_true", help="just the fetch, no feelings hurt")
+    p.add_argument("--no-logo", action="store_true", help="hide the penguin")
+    p.add_argument("--no-color", action="store_true", help="plain text")
+    p.add_argument("--color", action="store_true", help="colors even when not printing to a terminal")
+    p.add_argument("--demo", action="store_true", help="roast a made-up example system instead of yours")
+    p.add_argument("--json", action="store_true", help="print the collected facts as JSON")
+    p.add_argument("--version", action="version", version=f"roastfetch {__version__}")
+    args = p.parse_args(argv)
+
+    facts = dict(DEMO) if args.demo else collect()
+    if args.json:
+        print(json.dumps(facts, indent=2, default=str))
+        return 0
+    rng = random.Random(args.seed)
+    chosen = choose(roasts(facts, rng), max(0, args.roasts), rng)
+    colour = args.color or (sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR"))
+    sys.stdout.write(render(facts, chosen, Paint(colour), not args.no_logo, not args.no_roast))
+    return 0
+
+
+if __name__ == "__main__":
+    try:
+        raise SystemExit(main())
+    except KeyboardInterrupt:
+        raise SystemExit(130)
+    except BrokenPipeError:
+        raise SystemExit(0)

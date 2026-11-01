@@ -1,0 +1,50 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  distros:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Ubuntu 22.04
+            image: ubuntu:22.04
+            setup: apt-get update -q && apt-get install -yq python3
+          - name: Debian 12
+            image: debian:12
+            setup: apt-get update -q && apt-get install -yq python3
+          - name: Fedora
+            image: fedora:latest
+            setup: dnf install -yq python3
+          - name: Arch Linux
+            image: archlinux:latest
+            setup: pacman -Syu --noconfirm --needed python
+          - name: openSUSE Tumbleweed
+            image: opensuse/tumbleweed:latest
+            setup: zypper -n install python3
+          - name: Alpine (musl)
+            image: alpine:latest
+            setup: apk add --no-cache python3
+          - name: Python 3.9 (oldest supported)
+            image: python:3.9-slim
+            setup: "true"
+    steps:
+      - name: Install Python
+        run: ${{ matrix.setup }}
+      - uses: actions/checkout@v4
+      - name: Tests
+        run: python3 -m unittest discover -s tests -v
+      - name: Roast the CI machine
+        run: python3 roastfetch --no-color && python3 roastfetch --demo --no-color --seed 1
+      - name: install.sh from this checkout, then uninstall
+        run: |
+          sh install.sh --from . --bin-dir /tmp/rfbin
+          /tmp/rfbin/roastfetch --version
+          sh install.sh --uninstall --bin-dir /tmp/rfbin
+          test ! -e /tmp/rfbin/roastfetch
