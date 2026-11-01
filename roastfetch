@@ -16,6 +16,7 @@ import os
 import platform
 import random
 import re
+import shlex
 import shutil
 import sqlite3
 import subprocess
@@ -409,6 +410,69 @@ DEMO = {  # a made-up system for screenshots and for people who'd rather not be 
     "steam": {"hours": 1312, "games": 87, "top": "Elden Ring", "top_hours": 402},
     "home_age_days": 1100, "hour": 2,
 }
+
+
+# --- your real fetch tool ------------------------------------------------------
+
+def alias_files(shell: str) -> list[str]:
+    """Where shells pick up aliases, system files first so the user's own win."""
+    fish = shell == "fish"
+    if fish:
+        files = sorted(glob.glob(f"{HOST}/usr/share/fish/vendor_conf.d/*.fish"))
+        files += sorted(glob.glob(f"{HOST}/etc/fish/conf.d/*.fish"))
+        files += [f"{HOME}/.config/fish/config.fish"] + sorted(glob.glob(f"{HOME}/.config/fish/conf.d/*.fish"))
+    else:
+        files = sorted(glob.glob(f"{HOST}/etc/profile.d/*.sh")) + [f"{HOST}/etc/bashrc", f"{HOST}/etc/bash.bashrc"]
+        files += [f"{HOME}/.bashrc", f"{HOME}/.bash_aliases"] + sorted(glob.glob(f"{HOME}/.bashrc.d/*"))
+        if shell == "zsh":
+            files += [f"{HOST}/etc/zshrc", f"{HOST}/etc/zsh/zshrc", f"{HOME}/.zshrc"]
+    return files
+
+
+def find_alias(tool: str, shell: str) -> str | None:
+    found = None
+    for path in alias_files(shell):
+        for m in re.finditer(rf"^\s*alias\s+{tool}(?:=|\s+)(['\"])(.+?)\1\s*$", read(path), re.M):
+            found = m.group(2)  # later definitions win, like in the shell
+    return found
+
+
+def expand_alias(text: str, fish: bool, via_host: bool) -> list[str]:
+    """Turn an alias into argv: run its $(...) / (...) substitutions, expand $VARS and ~."""
+    def substitute(m: re.Match) -> str:
+        argv = ["sh", "-c", m.group(1)]
+        return run(["distrobox-host-exec", *argv] if via_host else argv, timeout=3).strip()
+    text = re.sub(r"\$\(([^()]*)\)", substitute, text)
+    if fish:
+        text = re.sub(r"(?<![\w$])\(([^()]*)\)", substitute, text)
+    return [os.path.expanduser(os.path.expandvars(a)) for a in shlex.split(text)]
+
+
+def fetch_command(shell: str) -> list[str] | None:
+    """Exactly what typing `neofetch` (or else `fastfetch`) would run in your shell."""
+    for tool in ("neofetch", "fastfetch"):
+        alias = find_alias(tool, shell)
+        if alias:
+            exe = alias.split()[0]
+            local = os.path.exists(exe) if exe.startswith("/") else bool(shutil.which(exe))
+            on_host = IN_BOX and os.path.exists(f"/run/host{exe if exe.startswith('/') else '/usr/bin/' + exe}")
+            if local or on_host:
+                argv = expand_alias(alias, shell == "fish", via_host=not local)
+                return argv if local else ["distrobox-host-exec", *argv]
+        if shutil.which(tool):
+            return [tool]
+        if IN_BOX and shutil.which("distrobox-host-exec") and os.path.exists(f"/run/host/usr/bin/{tool}"):
+            return ["distrobox-host-exec", tool]
+    return None
+
+
+def run_fetch(argv: list[str]) -> bool:
+    """Let the fetch tool draw straight into the terminal, so it looks exactly as usual."""
+    try:
+        sys.stdout.flush()
+        return subprocess.run(argv, timeout=20).returncode == 0
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 # --- the roast ---------------------------------------------------------------
@@ -1001,10 +1065,13 @@ def visible_len(line: str) -> int:
     return len(ANSI_SGR.sub("", line))
 
 
-def borrowed_logo(name: str | None, colour: bool) -> list[str]:
+def borrowed_logo(name: str | None, colour: bool, small: bool = False) -> list[str]:
     """The exact logo your own fetch tool draws, so roastfetch shows the icon you're used to.
-    Tries fastfetch, then neofetch; inside a distrobox, the host's copy."""
+    Tries fastfetch, then neofetch; inside a distrobox, the host's copy. small=True asks
+    fastfetch for the compact version it uses in narrow terminals."""
     ff = ["fastfetch", "--structure", "break", "--logo-print-remaining", "true", "--pipe", "false"]
+    if small:
+        ff += ["--logo-type", "small"]
     nf = ["neofetch", "-L"]
     if name:
         ff += ["--logo", name]
@@ -1140,26 +1207,40 @@ def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool
         (ACCENTS[x] for x in f["distro_like"].split() if x in ACCENTS), "#ffb000")
     width = shutil.get_terminal_size((100, 24)).columns
     title = f"{f['user']}@{f['hostname']}"
-    right = [paint(title, accent, bold=True), paint("─" * len(title), dim=True)]
     rows = info_lines(f)
     key_w = max(len(k) for k, _ in rows)
-    for key, value in rows:
-        right.append(f"{paint(key.ljust(key_w), accent, bold=True)}  {value}")
 
+    def right_column(max_value: int | None = None) -> list[str]:
+        out = [paint(title, accent, bold=True), paint("─" * len(title), dim=True)]
+        for key, value in rows:
+            if max_value is not None and len(value) > max_value:
+                value = value[:max(1, max_value - 1)] + "…"
+            out.append(f"{paint(key.ljust(key_w), accent, bold=True)}  {value}")
+        return out
+
+    right_w = max(len(title), *(key_w + 2 + len(v) for _, v in rows))
     logo: list[str] = []
     if show_logo:
         if not pixel:
-            logo = borrowed_logo(logo_name, paint.on)
+            # The full logo if it fits next to the specs, else fastfetch's small one.
+            room = width - right_w - 3
+            for small in ((False, True) if room >= 30 else (True,)):
+                candidate = borrowed_logo(logo_name, paint.on, small)
+                if candidate and (small or max(visible_len(c) for c in candidate) <= room):
+                    logo = candidate
+                    break
             if logo:
-                # the campfire goes under the borrowed logo, centred
                 w = max(visible_len(line) for line in logo)
                 pad = " " * max(0, (w - 20) // 2)
                 logo += [""] + [pad + row for row in logo_rows("tux", paint, flames_only=True)]
         if not logo:
             logo = logo_rows(logo_for(logo_name or f["distro_id"]), paint)
     logo_w = max((visible_len(line) for line in logo), default=0)
-    if logo and width < logo_w + 45:
-        logo = []  # terminal too narrow: specs and roast matter more than the art
+    room = width - logo_w - 3
+    if logo and room < key_w + 2 + 12:
+        logo, room = [], width  # tiny terminal: specs and roast matter more than the art
+    right = right_column(room - key_w - 2 if right_w > room else None)
+
     lines = []
     for i in range(max(len(right), len(logo))):
         left = ""
@@ -1168,15 +1249,19 @@ def render(f: dict, chosen: list[tuple[int, str]], paint: Paint, show_logo: bool
             left = cell + " " * (logo_w - visible_len(cell)) + "   "
         lines.append(left + (right[i] if i < len(right) else ""))
 
+    out = "\n".join(lines) + "\n"
     if roast and chosen:
-        lines.append("")
-        lines.append(paint("  roasted:", FLAME[0], bold=True))
-        for _, text in chosen:
-            lines.append(f"  {paint('›', FLAME[1], bold=True)} {text}")
-        level, score = verdict(chosen)
-        bar = paint("▰" * score, FLAME[1]) + paint("▱" * (10 - score), dim=True)
-        lines.append("")
-        lines.append(f"  {paint('Doneness:', FLAME[2], bold=True)} {level} {bar} {score}/10")
+        out += render_roast(chosen, paint)
+    return out
+
+
+def render_roast(chosen: list[tuple[int, str]], paint: Paint) -> str:
+    lines = ["", paint("  roasted:", FLAME[0], bold=True)]
+    for _, text in chosen:
+        lines.append(f"  {paint('›', FLAME[1], bold=True)} {text}")
+    level, score = verdict(chosen)
+    bar = paint("▰" * score, FLAME[1]) + paint("▱" * (10 - score), dim=True)
+    lines += ["", f"  {paint('Doneness:', FLAME[2], bold=True)} {level} {bar} {score}/10"]
     return "\n".join(lines) + "\n"
 
 
@@ -1185,7 +1270,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("-n", "--roasts", type=int, default=5, metavar="N", help="how many roasts (default 5)")
     p.add_argument("--seed", type=int, help="pick the same roasts every time")
     p.add_argument("--no-roast", action="store_true", help="just the fetch, no feelings hurt")
-    p.add_argument("--no-logo", action="store_true", help="hide the logo")
+    p.add_argument("--builtin", action="store_true", help="roastfetch's own fetch display instead of your neofetch/fastfetch")
+    p.add_argument("--only-roast", action="store_true", help="skip the fetch, just the roast")
+    p.add_argument("--no-logo", action="store_true", help="hide the logo (built-in display)")
     p.add_argument("--logo", metavar="DISTRO", help="show another distro's logo (any name fastfetch knows)")
     p.add_argument("--pixel-logo", action="store_true", help="use roastfetch's own pixel-art logo")
     p.add_argument("--no-color", action="store_true", help="plain text")
@@ -1202,8 +1289,31 @@ def main(argv: list[str] | None = None) -> int:
     rng = random.Random(args.seed)
     chosen = choose(roasts(facts, rng), max(0, args.roasts), rng)
     colour = args.color or (sys.stdout.isatty() and not args.no_color and not os.environ.get("NO_COLOR"))
+    paint = Paint(colour)
+    roast = not args.no_roast
+    if args.only_roast:
+        sys.stdout.write(render_roast(chosen, paint) if chosen else "")
+        return 0
+    # Normally: your own neofetch/fastfetch, exactly as you know it, then the roast.
+    builtin = args.builtin or args.demo or args.logo or args.pixel_logo or args.no_logo
+    command = None if builtin else fetch_command(facts["shell"])
+    shell = facts["shell"]
+    shell_path = shutil.which(shell) if shell in SHELLS and shell not in ("sh", "dash") else None
+    if command and shell_path and roast and chosen and sys.stdout.isatty():
+        # Become your shell running "fetch; roast", so the fetch tool's parent really is your
+        # shell and it reports it exactly as usual (it shows its parent process as "Shell").
+        me = os.path.realpath(sys.argv[0]) if os.path.exists(sys.argv[0]) else os.path.realpath(__file__)
+        seed = args.seed if args.seed is not None else random.randrange(1 << 30)
+        roast_cmd = [sys.executable, me, "--only-roast", "--seed", str(seed), "-n", str(args.roasts),
+                     "--color" if colour else "--no-color"]
+        sys.stdout.flush()
+        os.execv(shell_path, [shell, "-c", f"{shlex.join(command)}; {shlex.join(roast_cmd)}"])
+    if command and run_fetch(command):
+        if roast and chosen:
+            sys.stdout.write(render_roast(chosen, paint))
+        return 0
     logo = args.logo or (facts["distro_id"] if args.demo else None)
-    sys.stdout.write(render(facts, chosen, Paint(colour), not args.no_logo, not args.no_roast, logo, args.pixel_logo))
+    sys.stdout.write(render(facts, chosen, paint, not args.no_logo, roast, logo, args.pixel_logo))
     return 0
 
 

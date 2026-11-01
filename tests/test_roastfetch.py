@@ -28,7 +28,7 @@ class Collect(unittest.TestCase):
     def test_real_run_prints_a_roast(self):
         buf = io.StringIO()
         with redirect_stdout(buf):
-            self.assertEqual(rf.main(["--no-color", "--seed", "1"]), 0)
+            self.assertEqual(rf.main(["--builtin", "--no-color", "--seed", "1"]), 0)
         self.assertIn("roasted:", buf.getvalue())
         self.assertIn("Doneness:", buf.getvalue())
 
@@ -120,6 +120,24 @@ class Roasts(unittest.TestCase):
         self.assertEqual(plain, ["  /\\", " /  \\", "/____\\"])
         self.assertTrue(all(line.endswith("\x1b[0m") for line in coloured))
         self.assertNotIn("?25l", "".join(coloured))
+
+    def test_finds_and_expands_the_users_fetch_alias(self):
+        with tempfile.TemporaryDirectory() as root, tempfile.TemporaryDirectory() as home:
+            os.makedirs(os.path.join(root, "etc/profile.d"))
+            with open(os.path.join(root, "etc/profile.d/distro-fetch.sh"), "w") as f:
+                f.write("alias neofetch='/usr/bin/fastfetch --color $(echo 35) -c /etc/fetch.jsonc'\n")
+            with open(os.path.join(home, ".bashrc"), "w") as f:
+                f.write("alias fastfetch='fastfetch --logo small'\n")
+            old = rf.HOST, rf.HOME
+            rf.HOST, rf.HOME = root, home
+            try:
+                alias = rf.find_alias("neofetch", "bash")
+                argv = rf.expand_alias(alias, fish=False, via_host=False)
+                self.assertEqual(rf.find_alias("fastfetch", "bash"), "fastfetch --logo small")
+                self.assertIsNone(rf.find_alias("neofetch", "fish"))  # bash aliases don't apply to fish
+            finally:
+                rf.HOST, rf.HOME = old
+        self.assertEqual(argv, ["/usr/bin/fastfetch", "--color", "35", "-c", "/etc/fetch.jsonc"])
 
     def test_vdf(self):
         d = rf.parse_vdf('"A" { "B" { "Playtime" "12" } }')
