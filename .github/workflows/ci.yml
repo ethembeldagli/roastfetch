@@ -46,5 +46,7 @@ jobs:
         run: |
           sh install.sh --from . --bin-dir /tmp/rfbin
           /tmp/rfbin/roastfetch --version
+          sh install.sh --from . --bin-dir /tmp/rfbin --check | grep "Up to date"
+          sh install.sh --from . --bin-dir /tmp/rfbin --update | grep "Already up to date"
           sh install.sh --uninstall --bin-dir /tmp/rfbin
           test ! -e /tmp/rfbin/roastfetch

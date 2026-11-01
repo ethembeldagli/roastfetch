@@ -23,7 +23,7 @@ import subprocess
 import sys
 import time
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 HOME = os.path.expanduser("~")
 IN_BOX = os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")
 HOST = "/run/host" if IN_BOX and os.path.isdir("/run/host/etc") else ""
